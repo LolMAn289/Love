@@ -1,0 +1,605 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <title>For Szabina</title>
+    <link rel="stylesheet" href="love.css">
+</head>
+
+<body>
+    <main class="wrap">
+        <aside class="info">
+            <!-- Name oben -->
+            <div class="name">Szabina</div>
+            <div class="label">I love you since</div>
+            <div class="date big" id="startDateText">24 Aug 2025</div>
+
+            <div class="counter" aria-live="polite" id="counter">
+                <div><strong id="months">0</strong> months</div>
+                <div><strong id="weeks">0</strong> weeks</div>
+                <div><strong id="days">0</strong> days</div>
+                <div><strong id="hours">0</strong>h</div>
+                <div><strong id="minutes">0</strong>m</div>
+                <div><strong id="seconds">0</strong>s</div>
+            </div>
+        </aside>
+
+        <section class="stage">
+            <!-- Start button text changed -->
+            <button id="startBtn" class="start-heart" aria-label="Start">❤️ Click me!</button>
+
+            <div class="canvas-wrap">
+                <canvas id="treeCanvas" class="tree"></canvas>
+            </div>
+
+            <div class="ground"></div>
+        </section>
+    </main>
+
+    <!-- overlay for floating hearts -->
+    <canvas id="overlay" class="overlay"></canvas>
+
+    <audio id="clickSound">
+        <source src="click.mp3" type="audio/mpeg">
+    </audio>
+    <audio id="bgMusic" loop>
+        <source src="music.mp3" type="audio/mpeg">
+    </audio>
+
+    <script>
+        /* ================== CONFIG ================== */
+        const START_DATE_ISO = "2025-08-24T00:00:00";
+        const HEART_COLORS = ["#ff335e", "#ff6f92", "#ff2b58", "#ff9ab3", "#ff4d6d", "#ff8fb1"];
+        // reduce trunk height and give more bottom margin so tree doesn't overflow
+        const CANVAS_MARGIN_BOTTOM = 140; // vorher 110 — mehr Platz, verhindert Anschnitt
+        /* ============================================ */
+
+        /* Elements */
+        const treeCanvas = document.getElementById('treeCanvas');
+        const treeCtx = treeCanvas.getContext('2d');
+
+        const overlay = document.getElementById('overlay');
+        const octx = overlay.getContext('2d');
+
+        const startBtn = document.getElementById('startBtn');
+        const clickSound = document.getElementById('clickSound');
+        const bgMusic = document.getElementById('bgMusic');
+
+        const monthsEl = document.getElementById('months');
+        const weeksEl = document.getElementById('weeks');
+        const daysEl = document.getElementById('days');
+        const hoursEl = document.getElementById('hours');
+        const minutesEl = document.getElementById('minutes');
+        const secondsEl = document.getElementById('seconds');
+
+        const startDateTextEl = document.getElementById('startDateText');
+
+        let DPR = Math.max(window.devicePixelRatio || 1, 1);
+
+        /* Resize handling */
+        function resizeAll() {
+            // device pixel ratio (keine Änderung)
+            DPR = Math.max(window.devicePixelRatio || 1, 1);
+
+            // Größe des Canvas basierend auf dem canvas-wrap (oder Fensterbreite)
+            // wir nehmen 66% der Fensterbreite (oder max 920) - das passt sowohl auf Desktop als auch Handy
+            const wrapWidth = Math.min(window.innerWidth * 0.66, 920);
+            const w = Math.max(320, wrapWidth);            // min width fallback
+            const h = Math.round(w * 0.56);                // Höhe aus Breite (verhältnis)
+
+            // treeCanvas (HiDPI aware)
+            treeCanvas.style.width = w + 'px';
+            treeCanvas.style.height = h + 'px';
+            treeCanvas.width = Math.round(w * DPR);
+            treeCanvas.height = Math.round(h * DPR);
+            treeCtx.setTransform(DPR, 0, 0, DPR, 0, 0);
+
+            // Overlay = volle Viewport-Größe (für schwebende Herzen)
+            overlay.width = Math.round(window.innerWidth * DPR);
+            overlay.height = Math.round(window.innerHeight * DPR);
+            overlay.style.width = window.innerWidth + 'px';
+            overlay.style.height = window.innerHeight + 'px';
+            octx.setTransform(DPR, 0, 0, DPR, 0, 0);
+
+            // Nach dem Resize neu zeichnen
+            drawStatic();
+        }
+        window.addEventListener('load', resizeAll);
+        resizeAll(); // optional, safe
+
+        /* Easing */
+        function easeOutCubic(t) { return 1 - Math.pow(1 - t, 3); }
+
+        /* Branch model */
+        class Branch {
+            constructor(x, y, len, angle, depth) {
+                this.x = x; this.y = y;
+                this.len = len; this.angle = angle;
+                this.depth = depth;
+                this.progress = 0;
+                this.spawned = false;
+                this.endX = x; this.endY = y;
+            }
+            step(dt) {
+                const speed = 0.012 * (1 + this.depth * 0.06);
+                this.progress = Math.min(1, this.progress + speed * dt);
+                const cur = this.len * easeOutCubic(this.progress);
+                const rad = this.angle * Math.PI / 180;
+                this.endX = this.x + Math.cos(rad) * cur;
+                this.endY = this.y + Math.sin(rad) * cur;
+            }
+        }
+
+        /* storage */
+        let branches = [];
+        let animActive = false;
+        let crownParticles = []; // moving hearts inside crown (drifting)
+        let floatingHearts = []; // overlay hearts
+
+        /* Start tree */
+        function startTree() {
+            if (clickSound && clickSound.play) { try { clickSound.currentTime = 0; clickSound.play(); } catch (e) { } }
+            if (bgMusic && bgMusic.play) { try { bgMusic.volume = 0.40; bgMusic.play().catch(() => { }); } catch (e) { } }
+
+            startBtn.style.display = 'none';
+            branches.length = 0;
+            crownParticles.length = 0;
+            const startX = treeCanvas.width / DPR / 2;
+            const startY = (treeCanvas.height / DPR) - CANVAS_MARGIN_BOTTOM;
+            // make trunk noticeably shorter so whole crown stays inside canvas
+            branches.push(new Branch(startX, startY, (treeCanvas.height / DPR) * 0.22, -90, 0));
+            animActive = true;
+            requestAnimationFrame(treeLoop);
+        }
+
+        /* Tree loop */
+        function treeLoop() {
+            if (!animActive) return;
+            stepTree();
+            drawStatic();
+            branches.forEach(drawBranchSmooth);
+            const active = branches.some(b => b.progress < 1 || (b.progress >= 1 && !b.spawned));
+            if (active) requestAnimationFrame(treeLoop);
+            else {
+                animActive = false;
+                // create moving crown particles (dense, drifting)
+                startCrownParticles();
+                // animate them and start floating hearts
+                animateCrownParticles();
+                startFloatingHeartsRoutine();
+            }
+        }
+
+        /* tree stepping */
+        function stepTree() {
+            const dt = 1;
+            for (let i = 0; i < branches.length; i++) {
+                const b = branches[i];
+                b.step(dt);
+                if (b.progress >= 1 && !b.spawned) {
+                    b.spawned = true;
+                    if (b.depth < 5) {
+                        const spread = 10 + Math.random() * 26;
+                        const lf = 0.62 + Math.random() * 0.16;
+                        branches.push(new Branch(b.endX, b.endY, b.len * lf, b.angle - spread, b.depth + 1));
+                        branches.push(new Branch(b.endX, b.endY, b.len * lf, b.angle + spread, b.depth + 1));
+                        if (Math.random() > 0.7) branches.push(new Branch(b.endX, b.endY, b.len * 0.6, b.angle + (Math.random() * 40 - 20), b.depth + 1));
+                    }
+                }
+            }
+        }
+
+        /* draw static beach background (sunset sky, sea, sand) - sea changed to darker blue */
+        function drawStatic() {
+            const w = treeCanvas.width / DPR;
+            const h = treeCanvas.height / DPR;
+
+            // ---------- Sky (warm evening, unchanged-ish) ----------
+            const sky = treeCtx.createLinearGradient(0, 0, 0, h);
+            sky.addColorStop(0, '#ffdfe8');
+            sky.addColorStop(0.45, '#ffcfcf');
+            sky.addColorStop(0.75, '#ffc2a8');
+            sky.addColorStop(1, '#ffdfb8');
+            treeCtx.fillStyle = sky;
+            treeCtx.fillRect(0, 0, w, h);
+
+            // ---------- soft sun glow ----------
+            const sunY = h * 0.56;
+            const sunX = w * 0.82;
+            const r = Math.min(48, w * 0.06);
+            const sg = treeCtx.createRadialGradient(sunX, sunY, r * 0.2, sunX, sunY, r * 2.6);
+            sg.addColorStop(0, 'rgba(255,220,170,0.98)');
+            sg.addColorStop(0.35, 'rgba(255,185,110,0.55)');
+            sg.addColorStop(1, 'rgba(255,140,90,0)');
+            treeCtx.fillStyle = sg;
+            treeCtx.beginPath();
+            treeCtx.arc(sunX, sunY, r * 2.6, 0, Math.PI * 2);
+            treeCtx.fill();
+
+            // ---------- Sea: blended gradient (warm horizon + desaturated evening blue) ----------
+            // sea (blended evening blue with warm top reflection)
+            // ------------------ Sea: dunkelblau -> pastel pink Gradient (harmonisch mit Abendlicht) ------------------
+            const horizon = Math.round(h * 0.62);
+            const sea = treeCtx.createLinearGradient(0, horizon, 0, h);
+            // Top (nähe Horizont) leicht rosa/pastellig (Reflektion der Sonne), dann in kühleres Blau übergehen
+            sea.addColorStop(0.00, 'rgba(255,200,210,0.36)'); // warm-pastel near horizon
+            sea.addColorStop(0.22, 'rgba(220,170,200,0.20)'); // soft transition
+            sea.addColorStop(0.50, '#3a6b95');                // muted blue
+            sea.addColorStop(1.00, '#06223a');                // deep evening blue at bottom
+            treeCtx.fillStyle = sea;
+            treeCtx.fillRect(0, horizon, w, h - horizon);
+
+            // very soft warm overlay to blend sea & sky around sun reflection
+            treeCtx.save();
+            treeCtx.globalAlpha = 0.06;
+            treeCtx.fillStyle = 'rgba(255,190,150,0.06)';
+            treeCtx.fillRect(0, horizon - 6, w, 40);
+            treeCtx.restore();
+
+            // deutlich sichtbarere, aber dezente Wellenlinien auf dem dunklen Meer
+            treeCtx.strokeStyle = 'rgba(255,255,255,0.09)';
+            treeCtx.lineWidth = 1.1;
+            for (let i = 0; i < 9; i++) {
+                const yy = horizon + 8 + i * 10;
+                treeCtx.beginPath();
+                treeCtx.moveTo(8, yy);
+                for (let x = 8; x < w - 8; x += 22) {
+                    const ymod = Math.sin((x * 0.9 + i * 26) / 48) * 3.0;
+                    treeCtx.lineTo(x, yy + ymod);
+                }
+                treeCtx.stroke();
+            }
+
+            // ---------- subtle sun reflection band (soft, elongated) ----------
+            treeCtx.save();
+            const reflW = Math.max(120, r * 4);
+            const reflGrad = treeCtx.createLinearGradient(sunX - reflW, horizon, sunX + reflW, horizon + 18);
+            reflGrad.addColorStop(0, 'rgba(255,220,170,0.05)');
+            reflGrad.addColorStop(0.5, 'rgba(255,200,140,0.08)');
+            reflGrad.addColorStop(1, 'rgba(255,220,170,0.02)');
+            treeCtx.fillStyle = reflGrad;
+            treeCtx.fillRect(sunX - reflW, horizon, reflW * 2, 18);
+            treeCtx.restore();
+
+            // ---------- Sand (foreground) ----------
+            const groundH = CANVAS_MARGIN_BOTTOM;
+            const sand = treeCtx.createLinearGradient(0, h - groundH, 0, h);
+            sand.addColorStop(0, '#fbedea');
+            sand.addColorStop(1, '#f2dccf');
+            treeCtx.fillStyle = sand;
+            treeCtx.fillRect(0, h - groundH, w, groundH);
+
+            // light sand speckles
+            treeCtx.fillStyle = 'rgba(60,30,20,0.03)';
+            for (let i = 0; i < 100; i++) {
+                const sx = Math.random() * w;
+                const sy = h - groundH + Math.random() * groundH;
+                const rr = Math.random() * 1.6;
+                treeCtx.fillRect(sx, sy, rr, rr);
+            }
+        }
+
+        /* draw branch */
+        function drawBranchSmooth(b) {
+            treeCtx.lineCap = 'round';
+            treeCtx.strokeStyle = '#6b3e2a';
+            treeCtx.lineWidth = Math.max(1.2, 6 - b.depth * 0.9);
+
+            const cx = b.x + (b.endX - b.x) * 0.45 + Math.cos((b.angle - 90) * Math.PI / 180) * (8 + b.depth * 3);
+            const cy = b.y + (b.endY - b.y) * 0.45 + Math.sin((b.angle - 90) * Math.PI / 180) * (4 + b.depth * 2);
+
+            treeCtx.beginPath();
+            treeCtx.moveTo(b.x, b.y);
+            treeCtx.quadraticCurveTo(cx, cy, b.endX, b.endY);
+            treeCtx.stroke();
+        }
+
+        /* ========== CROWN PARTICLES (drifting hearts) ========== */
+        /* Create many small heart particles inside an ellipse (crown area) and give them small velocities
+           so they drift randomly and do NOT form a single rigid formation. */
+        function startCrownParticles() {
+            crownParticles.length = 0;
+            const w = treeCanvas.width / DPR;
+            const h = treeCanvas.height / DPR;
+
+            // Krone-Ellipse (etwas enger)
+            const cx = w / 2;
+            const cy = h * 0.30;
+            const rx = Math.min(w * 0.30, 320);
+            const ry = Math.min(h * 0.16, 130);
+            const area = Math.PI * rx * ry;
+
+            let targetCount = Math.round(area * 0.11);
+            targetCount = Math.min(Math.max(targetCount, 140), 600);
+
+            // alle relevanten Astendpunkte (depth >= 2)
+            const tips = [];
+            branches.forEach(b => {
+                if (b.depth >= 2) {
+                    tips.push({ x: b.endX, y: b.endY });
+                }
+            });
+
+            let attempts = 0;
+            while (crownParticles.length < targetCount && attempts < targetCount * 10) {
+                attempts++;
+                // uniform sample in ellipse
+                const u = Math.random();
+                const v = Math.random();
+                const rS = Math.sqrt(u);
+                const theta = 2 * Math.PI * v;
+                let sx = cx + rx * rS * Math.cos(theta) + (Math.random() * 10 - 5);
+                let sy = cy + ry * rS * Math.sin(theta) + (Math.random() * 8 - 4);
+
+                if (sy > (h - CANVAS_MARGIN_BOTTOM - 6)) continue;
+
+                // prüfe Abstand zum nächsten Astende
+                let minDist = Infinity;
+                for (let i = 0; i < tips.length; i++) {
+                    const dx = sx - tips[i].x;
+                    const dy = sy - tips[i].y;
+                    const d = Math.hypot(dx, dy);
+                    if (d < minDist) minDist = d;
+                }
+                const threshold = Math.max(36, Math.min(110, Math.max(rx, ry) * 0.18));
+                if (minDist > threshold) continue;
+
+                // größe & color, Heimatposition und begrenzter offset
+                const r = 6 + Math.random() * 6; // 6..12
+                const color = HEART_COLORS[Math.floor(Math.random() * HEART_COLORS.length)];
+                // very small initial drift
+                const vx = (Math.random() * 2 - 1) * 0.06;
+                const vy = (Math.random() * 2 - 1) * 0.04;
+                // maxOffset proportional zur Größe (verhindert große Wanderungen)
+                const maxOffset = 10 + Math.min(18, Math.round(r * 1.6));
+
+                crownParticles.push({
+                    x: sx,
+                    y: sy,
+                    homeX: sx,
+                    homeY: sy,
+                    r,
+                    color,
+                    vx,
+                    vy,
+                    phase: Math.random() * Math.PI * 2,
+                    maxOffset
+                });
+            }
+        }
+
+        /* animate crown particles (drift inside ellipse, with soft boundary bounce) */
+        let crownAnim = null;
+        function animateCrownParticles() {
+            if (crownAnim) cancelAnimationFrame(crownAnim);
+            let t = 0;
+            function frame() {
+                t += 1;
+                // redraw scene + branches
+                drawStatic();
+                branches.forEach(drawBranchSmooth);
+
+                const w = treeCanvas.width / DPR;
+                const h = treeCanvas.height / DPR;
+                const cx = w / 2;
+                const cy = h * 0.30;
+                const rx = Math.min(w * 0.36, 360);
+                const ry = Math.min(h * 0.20, 140);
+
+                crownParticles.forEach((p, i) => {
+                    // gentle spring force back to home
+                    const k = 0.06; // spring strength (tweakable: smaller = more loose)
+                    const dxHome = p.homeX - p.x;
+                    const dyHome = p.homeY - p.y;
+                    p.vx += dxHome * (k * 0.02);
+                    p.vy += dyHome * (k * 0.02);
+
+                    // tiny noise (very reduced so particles don't escape)
+                    p.vx += (Math.random() * 2 - 1) * 0.005;
+                    p.vy += (Math.random() * 2 - 1) * 0.003;
+
+                    // limit velocities to keep motion soft
+                    p.vx = Math.max(Math.min(p.vx, 0.6), -0.6);
+                    p.vy = Math.max(Math.min(p.vy, 0.45), -0.45);
+
+                    // integrate
+                    p.x += p.vx;
+                    p.y += p.vy;
+
+                    // containment: pull back if particle moved farther than maxOffset from home
+                    const dx = p.x - p.homeX;
+                    const dy = p.y - p.homeY;
+                    const dist = Math.hypot(dx, dy);
+                    if (dist > p.maxOffset) {
+                        // place back on circle at maxOffset (softly)
+                        const nx = dx / dist;
+                        const ny = dy / dist;
+                        p.x = p.homeX + nx * p.maxOffset;
+                        p.y = p.homeY + ny * p.maxOffset;
+                        // damp velocity
+                        p.vx *= 0.45;
+                        p.vy *= 0.45;
+                    }
+
+                    // also ensure stay inside crown ellipse (soft correction)
+                    const nx2 = (p.x - cx) / rx;
+                    const ny2 = (p.y - cy) / ry;
+                    if (nx2 * nx2 + ny2 * ny2 > 0.99) {
+                        // pull slightly toward center of crown
+                        p.x -= (p.x - cx) * 0.03;
+                        p.y -= (p.y - cy) * 0.02;
+                        p.vx *= 0.9;
+                        p.vy *= 0.9;
+                    }
+
+                    // draw heart
+                    const sway = Math.sin((t + p.phase * 40) / (p.maxOffset * 8)) * 1.6;
+                    drawHeartOnTree(p.x + sway, p.y + Math.sin((t + i) / 36) * 0.9, p.r, p.color, 1 - (Math.random() * 0.03));
+                });
+
+                crownAnim = requestAnimationFrame(frame);
+            }
+            crownAnim = requestAnimationFrame(frame);
+        }
+
+        /* draws heart centered on tree canvas coords (smooth shape) */
+        function drawHeartOnTree(x, y, size, color, alpha = 1) {
+            treeCtx.save();
+            treeCtx.globalAlpha = alpha;
+            treeCtx.translate(x, y);
+            treeCtx.scale(size / 24, size / 24);
+            treeCtx.beginPath();
+            treeCtx.moveTo(0, 8);
+            treeCtx.bezierCurveTo(0, -6, -12, -6, -12, 4);
+            treeCtx.bezierCurveTo(-12, 14, 0, 20, 0, 24);
+            treeCtx.bezierCurveTo(0, 20, 12, 14, 12, 4);
+            treeCtx.bezierCurveTo(12, -6, 0, -6, 0, 8);
+            treeCtx.closePath();
+            treeCtx.fillStyle = color;
+            treeCtx.fill();
+            // highlight
+            treeCtx.beginPath();
+            treeCtx.fillStyle = 'rgba(255,255,255,0.14)';
+            treeCtx.ellipse(-3, -2, 3, 2, -0.5, 0, Math.PI * 2);
+            treeCtx.fill();
+            treeCtx.restore();
+        }
+
+        /* ---------------- Floating hearts overlay ---------------- */
+        function spawnFloatingHeart() {
+            if (crownParticles.length === 0) return;
+            // pick random crown particle as start
+            let leaf = crownParticles[Math.floor(Math.random() * crownParticles.length)];
+            if (!leaf) return;
+            const treeRect = treeCanvas.getBoundingClientRect();
+            let startX = treeRect.left + Math.max(4, Math.min(leaf.x, treeRect.width - 4));
+            let startY = treeRect.top + Math.max(4, Math.min(leaf.y, treeRect.height - 4));
+
+            // ensure start point is visibly inside viewport
+            if (startY < 0 || startY > window.innerHeight - 10) {
+                startY = Math.max(40, Math.min(window.innerHeight * 0.6, startY));
+            }
+
+            // target is startDateTextEl center
+            const targetRect = startDateTextEl.getBoundingClientRect();
+            const tx = targetRect.left + targetRect.width / 2;
+            const ty = targetRect.top + targetRect.height / 2;
+
+            const r = 6 + Math.random() * 6;
+            const color = HEART_COLORS[Math.floor(Math.random() * HEART_COLORS.length)];
+
+            const dx = tx - startX;
+            const dy = ty - startY;
+            const dist = Math.hypot(dx, dy) || 1;
+            const travel = 60 + Math.random() * 60;
+            const vx = dx / travel;
+            const vy = dy / travel;
+
+            floatingHearts.push({ x: startX, y: startY, tx, ty, vx, vy, r, color, life: 0, alpha: 1 });
+        }
+
+        let overlayAnimId = null;
+        function animateOverlay() {
+            if (overlayAnimId) cancelAnimationFrame(overlayAnimId);
+            function frame() {
+                octx.clearRect(0, 0, overlay.width / DPR, overlay.height / DPR);
+                for (let i = floatingHearts.length - 1; i >= 0; i--) {
+                    const h = floatingHearts[i];
+                    h.x += h.vx;
+                    h.y += h.vy;
+                    h.life++;
+                    const dx = h.tx - h.x;
+                    const dy = h.ty - h.y;
+                    const d = Math.hypot(dx, dy);
+                    if (d < 10 || h.life > 400) {
+                        floatingHearts.splice(i, 1);
+                        continue;
+                    }
+                    drawHeartOnOverlay(h.x, h.y, h.r, h.color, Math.max(0.95 - (h.life / 450), 0.12));
+                }
+                overlayAnimId = requestAnimationFrame(frame);
+            }
+            overlayAnimId = requestAnimationFrame(frame);
+        }
+
+        /* draw heart on overlay (viewport coords) */
+        function drawHeartOnOverlay(x, y, size, color, alpha = 1) {
+            octx.save();
+            octx.globalAlpha = alpha;
+            octx.translate(x, y);
+            octx.scale(size / 24, size / 24);
+            octx.beginPath();
+            octx.moveTo(0, 8);
+            octx.bezierCurveTo(0, -6, -12, -6, -12, 4);
+            octx.bezierCurveTo(-12, 14, 0, 20, 0, 24);
+            octx.bezierCurveTo(0, 20, 12, 14, 12, 4);
+            octx.bezierCurveTo(12, -6, 0, -6, 0, 8);
+            octx.closePath();
+            octx.fillStyle = color;
+            octx.fill();
+            octx.beginPath();
+            octx.fillStyle = 'rgba(255,255,255,0.14)';
+            octx.ellipse(-3, -2, 3, 2, -0.5, 0, Math.PI * 2);
+            octx.fill();
+            octx.restore();
+        }
+
+        /* start spawning floating hearts regularly */
+        let floatIntervalId = null;
+        function startFloatingHeartsRoutine() {
+            if (floatIntervalId) clearInterval(floatIntervalId);
+            animateOverlay();
+            // spawn frequency: tweak here if you want more or less
+            floatIntervalId = setInterval(spawnFloatingHeart, 520);
+        }
+
+        /* ---------------- Counter ---------------- */
+        const startDate = new Date(START_DATE_ISO);
+        function updateCounter() {
+            const now = new Date();
+            let diff = Math.max(0, now - startDate);
+
+            const msInDay = 24 * 3600 * 1000;
+            const msInWeek = msInDay * 7;
+            const msInMonth = msInDay * 30;
+
+            const months = Math.floor(diff / msInMonth);
+            diff -= months * msInMonth;
+
+            const weeks = Math.floor(diff / msInWeek);
+            diff -= weeks * msInWeek;
+
+            const days = Math.floor(diff / msInDay);
+            diff -= days * msInDay;
+
+            const hours = Math.floor(diff / 3600000);
+            diff -= hours * 3600000;
+
+            const minutes = Math.floor(diff / 60000);
+            const seconds = Math.floor((diff % 60000) / 1000);
+
+            monthsEl.textContent = months;
+            weeksEl.textContent = weeks;
+            daysEl.textContent = days;
+            hoursEl.textContent = hours;
+            minutesEl.textContent = minutes;
+            secondsEl.textContent = seconds;
+        }
+        setInterval(updateCounter, 1000);
+        updateCounter();
+
+        /* UI */
+        startBtn.addEventListener('pointerdown', (e) => {
+            e.preventDefault();
+            startTree();
+        });
+
+        /* initial */
+        drawStatic();
+        animateOverlay();
+    </script>
+</body>
+
+</html>
